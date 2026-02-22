@@ -2,7 +2,7 @@
    -----------------------------------------------------------------------------
    CIRCBUF.H v1.0.0
    -----------------------------------------------------------------------------
-   Lock-free SPSC circular buffer with slot sequence numbers.
+   Lock-free SPSC/MPMC circular buffer with slot sequence numbers.
    Memory-agnostic via Allocator pattern.
    
    Author:  Juuso Rinta
