@@ -39,13 +39,13 @@ typedef struct {
 } Slot;
 
 typedef struct {
-	uint8_t				*slots;
-	uint32_t			slot_size;
-	uint32_t			stride;
-	uint32_t			mask;
-	Allocator			alloc;
-	_Atomic uint32_t	head;
-	_Atomic uint32_t	tail;
+	uint8_t							*slots;
+	uint32_t						slot_size;
+	uint32_t						stride;
+	uint32_t						mask;
+	Allocator						alloc;
+	_Alignas(64) _Atomic uint32_t	head;
+	_Alignas(64) _Atomic uint32_t	tail;
 } CircularBuffer;
 
 /* -- API -- */
@@ -64,6 +64,8 @@ int cb_pop(CircularBuffer *cb, void *data, uint32_t size);
 #ifndef CIRCBUF_IMPLEMENTATION_GUARD
 #define CIRCBUF_IMPLEMENTATION_GUARD
 
+#define ALIGN_UP(val, align) (((val) + (align) - 1) & ~((align) - 1))
+
 static int	cb_is_power_of_two(uint32_t n) { return (n >= 2 && (n & (n - 1)) == 0); }
 static Slot	*cb_slot(CircularBuffer *cb, uint32_t pos) { return ((Slot *)(cb->slots + (pos & cb->mask) * cb->stride)); }
 
@@ -77,7 +79,7 @@ int			cb_init(CircularBuffer *cb, Allocator alloc, uint32_t capacity, uint32_t s
 	if (!cb || !alloc.alloc || !cb_is_power_of_two(capacity) || slot_size == 0)
 		return (-EINVAL);
 
-	cb->stride = sizeof(Slot) + slot_size;
+	cb->stride = ALIGN_UP(sizeof(Slot) + slot_size, _Alignof(Slot));
 	cb->alloc = alloc;
 	cb->slot_size = slot_size;
 	cb->mask = capacity - 1;
