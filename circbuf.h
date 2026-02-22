@@ -110,21 +110,40 @@ int	cb_push(CircularBuffer *cb, const void *data, uint32_t size)
 	assert(cb != NULL && "cb is NULL");
 	assert(data != NULL && "data is NULL");
 	assert(size <= cb->slot_size && "size exceeds slot_size");
-
 	if (!cb || !data || size > cb->slot_size)
 		return (-EINVAL);
 
-	uint32_t pos = atomic_load_explicit(&cb->head, memory_order_relaxed);
-	Slot *slot = cb_slot(cb, pos);
+	uint32_t	pos = atomic_load_explicit(&cb->head, memory_order_relaxed);
+	Slot		*slot;
+#ifdef CIRCBUF_MPMC
+	for (;;)
+	{
+		slot = cb_slot(cb, pos);
+		uint32_t seq = atomic_load_explicit(&slot->seq, memory_order_acquire);
+		int32_t	 diff = (int32_t)(seq - pos);
 
+		if (diff == 0)
+		{
+			if (atomic_compare_exchange_weak_explicit(&cb->head, &pos, pos + 1,
+					memory_order_relaxed, memory_order_relaxed))
+				break;
+			// else CAS failed, pos updated, retry
+		}
+		else if (diff < 0)
+			return (-1); // Full
+		else
+			pos = atomic_load_explicit(&cb->head, memory_order_relaxed); // Retry
+	}
+#else
+	slot = cb_slot(cb, pos);
 	uint32_t seq = atomic_load_explicit(&slot->seq, memory_order_acquire);
 	if (seq != pos)
 		return (-1); // Full
-	
 	atomic_store_explicit(&cb->head, pos + 1, memory_order_relaxed);
+#endif
+
 	memcpy(slot->data, data, size);
 	atomic_store_explicit(&slot->seq, pos + 1, memory_order_release);
-
 	return (0);
 }
 
@@ -137,16 +156,34 @@ int cb_pop(CircularBuffer *cb, void *data, uint32_t size)
 	if (!cb || !data || size > cb->slot_size)
 		return (-EINVAL);
 
-	uint32_t pos = atomic_load_explicit(&cb->tail, memory_order_relaxed);
-	Slot *slot = cb_slot(cb, pos);
+	uint32_t	pos = atomic_load_explicit(&cb->tail, memory_order_relaxed);
+	Slot		*slot;
+#ifdef CIRCBUF_MPMC
+	for (;;)
+	{
+		slot = cb_slot(cb, pos);
+		uint32_t seq = atomic_load_explicit(&slot->seq, memory_order_acquire);
+		int32_t  diff = (int32_t)(seq - (pos + 1));
 
+		if (diff == 0)
+		{
+			if (atomic_compare_exchange_weak_explicit(&cb->tail, &pos, pos + 1,
+					memory_order_relaxed, memory_order_relaxed))
+				break;
+		}
+		else if (diff < 0)
+			return (-1); // Empty
+		else
+			pos = atomic_load_explicit(&cb->tail, memory_order_relaxed);
+	}
+#else
+	slot = cb_slot(cb, pos);
 	uint32_t seq = atomic_load_explicit(&slot->seq, memory_order_acquire);
 	if (seq != pos + 1)
 		return (-1); // Empty
-
-	memcpy(data, slot->data, size);
 	atomic_store_explicit(&cb->tail, pos + 1, memory_order_relaxed);
-
+#endif
+	memcpy(data, slot->data, size);
 	atomic_store_explicit(&slot->seq, pos + cb->mask + 1, memory_order_release);
 	return (0);
 }
