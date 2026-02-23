@@ -52,6 +52,12 @@ typedef struct {
 int	cb_init(CircularBuffer *cb, Allocator alloc, uint32_t capacity, uint32_t slot_size);
 void cb_free(CircularBuffer *cb);
 
+void *cb_push_claim(CircularBuffer *cb, uint32_t *out_pos);
+void cb_push_publish(CircularBuffer *cb, uint32_t pos);
+
+void *cb_pop_claim(CircularBuffer *cb, uint32_t *out_pos);
+void cb_pop_release(CircularBuffer *cb, uint32_t pos);
+
 int cb_push(CircularBuffer *cb, const void *data, uint32_t size);
 int cb_pop(CircularBuffer *cb, void *data, uint32_t size);
 
@@ -105,16 +111,13 @@ void cb_free(CircularBuffer *cb)
 	cb->slots = NULL;
 }
 
-int	cb_push(CircularBuffer *cb, const void *data, uint32_t size)
+void *cb_push_claim(CircularBuffer *cb, uint32_t *out_pos)
 {
 	assert(cb != NULL && "cb is NULL");
-	assert(data != NULL && "data is NULL");
-	assert(size <= cb->slot_size && "size exceeds slot_size");
-	if (!cb || !data || size > cb->slot_size)
-		return (-EINVAL);
+	assert(out_pos != NULL && "out_pos is NULL");
 
-	uint32_t	pos = atomic_load_explicit(&cb->head, memory_order_relaxed);
-	Slot		*slot;
+	uint32_t pos = atomic_load_explicit(&cb->head, memory_order_relaxed);
+	Slot *slot;
 #ifdef CIRCBUF_MPMC
 	for (;;)
 	{
@@ -130,7 +133,7 @@ int	cb_push(CircularBuffer *cb, const void *data, uint32_t size)
 			// else CAS failed, pos updated, retry
 		}
 		else if (diff < 0)
-			return (-1); // Full
+			return (NULL); // Full
 		else
 			pos = atomic_load_explicit(&cb->head, memory_order_relaxed); // Retry
 	}
@@ -138,24 +141,45 @@ int	cb_push(CircularBuffer *cb, const void *data, uint32_t size)
 	slot = cb_slot(cb, pos);
 	uint32_t seq = atomic_load_explicit(&slot->seq, memory_order_acquire);
 	if (seq != pos)
-		return (-1); // Full
+		return (NULL); // Full
 	atomic_store_explicit(&cb->head, pos + 1, memory_order_relaxed);
 #endif
-
-	memcpy(slot->data, data, size);
-	atomic_store_explicit(&slot->seq, pos + 1, memory_order_release);
-	return (0);
+	*out_pos = pos;
+	return (slot->data);
 }
 
-int cb_pop(CircularBuffer *cb, void *data, uint32_t size)
+void cb_push_publish(CircularBuffer *cb, uint32_t pos)
+{
+	assert(cb != NULL && "cb is NULL");
+	
+	Slot *slot = cb_slot(cb, pos);
+	atomic_store_explicit(&slot->seq, pos + 1, memory_order_release);
+}
+
+int	cb_push(CircularBuffer *cb, const void *data, uint32_t size)
 {
 	assert(cb != NULL && "cb is NULL");
 	assert(data != NULL && "data is NULL");
 	assert(size <= cb->slot_size && "size exceeds slot_size");
-
 	if (!cb || !data || size > cb->slot_size)
 		return (-EINVAL);
 
+	uint32_t pos;
+	void *slot_data = cb_push_claim(cb, &pos);
+	if (!slot_data)
+		return (-1); // Full
+
+	memcpy(slot_data, data, size);
+	cb_push_publish(cb, pos);
+
+	return (0);
+}
+
+void *cb_pop_claim(CircularBuffer *cb, uint32_t *out_pos)
+{
+    assert(cb != NULL && "cb is NULL");
+    assert(out_pos != NULL && "out_pos is NULL");
+	
 	uint32_t	pos = atomic_load_explicit(&cb->tail, memory_order_relaxed);
 	Slot		*slot;
 #ifdef CIRCBUF_MPMC
@@ -172,7 +196,7 @@ int cb_pop(CircularBuffer *cb, void *data, uint32_t size)
 				break;
 		}
 		else if (diff < 0)
-			return (-1); // Empty
+			return (NULL); // Empty
 		else
 			pos = atomic_load_explicit(&cb->tail, memory_order_relaxed);
 	}
@@ -180,11 +204,38 @@ int cb_pop(CircularBuffer *cb, void *data, uint32_t size)
 	slot = cb_slot(cb, pos);
 	uint32_t seq = atomic_load_explicit(&slot->seq, memory_order_acquire);
 	if (seq != pos + 1)
-		return (-1); // Empty
+		return (NULL); // Empty
 	atomic_store_explicit(&cb->tail, pos + 1, memory_order_relaxed);
 #endif
-	memcpy(data, slot->data, size);
+	*out_pos = pos;
+	return (slot->data);
+}
+
+void cb_pop_release(CircularBuffer *cb, uint32_t pos)
+{
+	assert(cb != NULL && "cb is NULL");
+
+	Slot *slot = cb_slot(cb, pos);
 	atomic_store_explicit(&slot->seq, pos + cb->mask + 1, memory_order_release);
+}
+
+int cb_pop(CircularBuffer *cb, void *data, uint32_t size)
+{
+	assert(cb != NULL && "cb is NULL");
+	assert(data != NULL && "data is NULL");
+	assert(size <= cb->slot_size && "size exceeds slot_size");
+
+	if (!cb || !data || size > cb->slot_size)
+		return (-EINVAL);
+
+	uint32_t	pos;
+	void		*slot_data = cb_pop_claim(cb, &pos);
+
+	if (!slot_data)
+		return (-1); // Empty
+
+	memcpy(data, slot_data, size);
+	cb_pop_release(cb, pos);
 	return (0);
 }
 
